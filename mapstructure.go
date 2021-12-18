@@ -162,6 +162,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"reflect"
 	"sort"
 	"strconv"
@@ -251,6 +252,10 @@ type DecoderConfig struct {
 	// the decoding. If this is nil, then no metadata will be tracked.
 	Metadata *Metadata
 
+	// If Introspect is true, mapstructure will keep track of
+	// elements encountered in the output structure in Metadata.
+	Introspect bool
+
 	// Result is a pointer to the struct that will contain the decoded
 	// value.
 	Result interface{}
@@ -284,6 +289,10 @@ type Metadata struct {
 	// Unused is a slice of keys that were found in the raw value but
 	// weren't decoded since there was no matching field in the result interface
 	Unused []string
+
+	// Fields is a map of all fields encountered in the destination structure
+	// as understood by mapstructure along with their kind.
+	Fields map[string]reflect.Kind
 }
 
 // Decode takes an input structure and uses reflection to translate it to
@@ -375,6 +384,9 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 		if config.Metadata.Unused == nil {
 			config.Metadata.Unused = make([]string, 0)
 		}
+		if config.Metadata.Fields == nil {
+			config.Metadata.Fields = make(map[string]reflect.Kind)
+		}
 	}
 
 	if config.TagName == "" {
@@ -395,12 +407,14 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 // Decode decodes the given raw interface to the target pointer specified
 // by the configuration.
 func (d *Decoder) Decode(input interface{}) error {
+	//log.Print("mapstructure.Decode() called")
 	return d.decode("", input, reflect.ValueOf(d.config.Result).Elem())
 }
 
 // Decodes an unknown data type into a specific reflection value.
 func (d *Decoder) decode(name string, input interface{}, outVal reflect.Value) error {
 	var inputVal reflect.Value
+	//log.Printf("\nname=%v\ninput=%v\noutVal=%v", name, input, outVal)
 	if input != nil {
 		inputVal = reflect.ValueOf(input)
 
@@ -409,11 +423,13 @@ func (d *Decoder) decode(name string, input interface{}, outVal reflect.Value) e
 		if inputVal.Kind() == reflect.Ptr && inputVal.IsNil() {
 			input = nil
 		}
+		//log.Printf("input not nil, inputVal=%v, input=%v", inputVal, input)
 	}
 
 	if input == nil {
 		// If the data is nil, then we don't set anything, unless ZeroFields is set
 		// to true.
+		log.Printf("input is nil, name=%v", name)
 		if d.config.ZeroFields {
 			outVal.Set(reflect.Zero(outVal.Type()))
 
@@ -427,6 +443,7 @@ func (d *Decoder) decode(name string, input interface{}, outVal reflect.Value) e
 	if !inputVal.IsValid() {
 		// If the input value is invalid, then we just set the value
 		// to be the zero value.
+		//log.Printf("inputVal is not valid: %v", inputVal)
 		outVal.Set(reflect.Zero(outVal.Type()))
 		if d.config.Metadata != nil && name != "" {
 			d.config.Metadata.Keys = append(d.config.Metadata.Keys, name)
@@ -446,6 +463,7 @@ func (d *Decoder) decode(name string, input interface{}, outVal reflect.Value) e
 	var err error
 	outputKind := getKind(outVal)
 	addMetaKey := true
+	//log.Printf("mapstructure.decode(): name=%v, outputKind=%v", name, outputKind)
 	switch outputKind {
 	case reflect.Bool:
 		err = d.decodeBool(name, input, outVal)
@@ -480,6 +498,10 @@ func (d *Decoder) decode(name string, input interface{}, outVal reflect.Value) e
 	// mark the key as used if we're tracking metainput.
 	if addMetaKey && d.config.Metadata != nil && name != "" {
 		d.config.Metadata.Keys = append(d.config.Metadata.Keys, name)
+	}
+	if d.config.Introspect && d.config.Metadata != nil && name != "" {
+		log.Printf("Fields[%v] = %v", name, outputKind)
+		d.config.Metadata.Fields[name] = outputKind
 	}
 
 	return err
@@ -1199,15 +1221,22 @@ func (d *Decoder) decodeStruct(name string, data interface{}, val reflect.Value)
 	// then we just set it directly instead of recursing into the structure.
 	if dataVal.Type() == val.Type() {
 		val.Set(dataVal)
+		log.Printf("decodeStruct doing the setting for %v", name)
+		// TODO : do not return nil to continue introspecting
 		return nil
 	}
 
 	dataValKind := dataVal.Kind()
+	//log.Printf("datavalKind: %v", dataValKind)
 	switch dataValKind {
 	case reflect.Map:
-		return d.decodeStructFromMap(name, dataVal, val)
+		// this will call d.decode()
+		toto := d.decodeStructFromMap(name, dataVal, val)
+		//log.Printf("reflect for %v is map : \nDATAVAL=%v", name, dataVal)
+		return toto // d.decodeStructFromMap(name, dataVal, val)
 
 	case reflect.Struct:
+		log.Printf("reflect for %v struct", name)
 		// Not the most efficient way to do this but we can optimize later if
 		// we want to. To convert from struct to struct we go to map first
 		// as an intermediary.
@@ -1226,8 +1255,10 @@ func (d *Decoder) decodeStruct(name string, data interface{}, val reflect.Value)
 		if err := d.decodeMapFromStruct(name, dataVal, reflect.Indirect(addrVal), mval); err != nil {
 			return err
 		}
+		log.Printf("addrval = %v\nmval=%v", addrVal, mval)
 
 		result := d.decodeStructFromMap(name, reflect.Indirect(addrVal), val)
+		log.Printf("addrval = %v", addrVal)
 		return result
 
 	default:
@@ -1250,6 +1281,7 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 		dataValKeysUnused[dataValKey.Interface()] = struct{}{}
 	}
 
+	//log.Printf("\ndatavalKeys=%v\ndatavalkeysunused=%v", dataValKeys, dataValKeysUnused)
 	errors := make([]string, 0)
 
 	// This slice will keep track of all the structs we'll be decoding.
@@ -1257,6 +1289,7 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 	// that are squashed.
 	structs := make([]reflect.Value, 1, 5)
 	structs[0] = val
+	//log.Printf("decodeStructFromMap structs=%v", structs)
 
 	// Compile the list of all the fields that we're going to be decoding
 	// from all the structs.
@@ -1275,6 +1308,7 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 		structs = structs[1:]
 
 		structType := structVal.Type()
+		//log.Printf("structType: %v", structType)
 
 		for i := 0; i < structType.NumField(); i++ {
 			fieldType := structType.Field(i)
@@ -1321,6 +1355,7 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 			}
 		}
 	}
+	//log.Printf("fields: %v", fields) // raw fields list
 
 	// for fieldType, field := range fields {
 	for _, f := range fields {
@@ -1355,7 +1390,23 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 			if !rawMapVal.IsValid() {
 				// There was no matching key in the map for the value in
 				// the struct. Just ignore.
-				continue
+				// log.Printf("no matching key? rawmapval=%v  rawMapKey=%v, fieldName=%v", rawMapVal, rawMapKey, fieldName)
+				// if type is struct, create map instead ?
+				if d.config.Introspect == true {
+					kind := field.Type.Kind()
+					switch kind {
+					case reflect.Struct:
+						// weird thing here, create a map to stick with same behavior, because
+						// it looks like normal code path in decodeStruct always goes through the
+						// reflect.Map side of the switch for some reason
+						rawMapVal = reflect.New(reflect.TypeOf((map[string]interface{})(nil)))
+					default:
+						rawMapVal = reflect.New(field.Type).Elem() // create instance of our field
+					}
+				} else {
+					//log.Printf("no matching key? rawmapval=%v  rawMapKey=%v", rawMapVal, rawMapKey)
+					continue
+				}
 			}
 		}
 
