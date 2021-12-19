@@ -292,7 +292,7 @@ type Metadata struct {
 
 	// Fields is a map of all fields encountered in the destination structure
 	// as understood by mapstructure along with their kind.
-	Fields map[string]reflect.Kind
+	Fields map[string]reflect.StructField
 }
 
 // Decode takes an input structure and uses reflection to translate it to
@@ -385,7 +385,7 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 			config.Metadata.Unused = make([]string, 0)
 		}
 		if config.Metadata.Fields == nil {
-			config.Metadata.Fields = make(map[string]reflect.Kind)
+			config.Metadata.Fields = make(map[string]reflect.StructField)
 		}
 	}
 
@@ -429,7 +429,7 @@ func (d *Decoder) decode(name string, input interface{}, outVal reflect.Value) e
 	if input == nil {
 		// If the data is nil, then we don't set anything, unless ZeroFields is set
 		// to true.
-		log.Printf("input is nil, name=%v", name)
+		//log.Printf("input is nil, name=%v", name)
 		if d.config.ZeroFields {
 			outVal.Set(reflect.Zero(outVal.Type()))
 
@@ -498,10 +498,6 @@ func (d *Decoder) decode(name string, input interface{}, outVal reflect.Value) e
 	// mark the key as used if we're tracking metainput.
 	if addMetaKey && d.config.Metadata != nil && name != "" {
 		d.config.Metadata.Keys = append(d.config.Metadata.Keys, name)
-	}
-	if d.config.Introspect && d.config.Metadata != nil && name != "" {
-		log.Printf("Fields[%v] = %v", name, outputKind)
-		d.config.Metadata.Fields[name] = outputKind
 	}
 
 	return err
@@ -1221,8 +1217,6 @@ func (d *Decoder) decodeStruct(name string, data interface{}, val reflect.Value)
 	// then we just set it directly instead of recursing into the structure.
 	if dataVal.Type() == val.Type() {
 		val.Set(dataVal)
-		log.Printf("decodeStruct doing the setting for %v", name)
-		// TODO : do not return nil to continue introspecting
 		return nil
 	}
 
@@ -1428,6 +1422,11 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 		// don't dot-join the fields.
 		if name != "" {
 			fieldName = name + "." + fieldName
+		}
+
+		if d.config.Introspect {
+			d.config.Metadata.Fields[fieldName] = field
+
 		}
 
 		if err := d.decode(fieldName, rawMapVal.Interface(), fieldValue); err != nil {
