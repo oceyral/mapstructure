@@ -254,6 +254,7 @@ type DecoderConfig struct {
 
 	// If Introspect is true, mapstructure will keep track of
 	// elements encountered in the output structure in Metadata.
+	// As a side effect, the Result interface will be zeroed.
 	Introspect bool
 
 	// Result is a pointer to the struct that will contain the decoded
@@ -291,7 +292,7 @@ type Metadata struct {
 	Unused []string
 
 	// Fields is a map of all fields encountered in the destination structure
-	// as understood by mapstructure along with their kind.
+	// as understood by mapstructure.
 	Fields map[string]reflect.StructField
 }
 
@@ -402,6 +403,36 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 	}
 
 	return result, nil
+}
+
+// Introspect will return introspected Metadata from a struct.
+func Introspect(input interface{}, config *DecoderConfig) (*Metadata, error) {
+	// copy interface, because we're going to zero the struct used
+	// during introspection
+	val := reflect.ValueOf(input)
+	if val.Kind() == reflect.Ptr {
+		val = reflect.Indirect(val)
+	}
+	copy := reflect.New(val.Type()).Interface()
+
+	config_copy := &DecoderConfig{
+		Metadata:         &Metadata{},
+		Result:           copy,
+		WeaklyTypedInput: config.WeaklyTypedInput,
+		Introspect:       true,
+		DecodeHook:       config.DecodeHook,
+	}
+
+	decoder, err := NewDecoder(config_copy)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := decoder.Decode((map[string]interface{})(nil)); err != nil {
+		return nil, err
+	}
+
+	return config_copy.Metadata, nil
 }
 
 // Decode decodes the given raw interface to the target pointer specified
@@ -1393,6 +1424,7 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 						// weird thing here, create a map to stick with same behavior, because
 						// it looks like normal code path in decodeStruct always goes through the
 						// reflect.Map side of the switch for some reason
+						// => we always want to stick with maps because we're pretending to build one
 						rawMapVal = reflect.New(reflect.TypeOf((map[string]interface{})(nil)))
 					default:
 						rawMapVal = reflect.New(field.Type).Elem() // create instance of our field
